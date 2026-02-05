@@ -1,0 +1,115 @@
+name: Evaluacion de Pruebas
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    test:
+        name: Ejecutar pruebas y calcular nota
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Clonar repositorio
+              uses: actions/checkout@v3
+
+            - name: Instalar Java
+              uses: actions/setup-java@v3
+              with:
+                  java-version: "17"
+                  distribution: "temurin"
+
+            - name: Compilar archivos
+              id: compilar
+              continue-on-error: true
+              run: |
+                  mkdir -p bin
+                  if javac -cp "lib/*" -d bin $(find src -name "*.java"); then
+                    echo "salida=0" >> $GITHUB_ENV
+                  else
+                    echo "salida=1" >> $GITHUB_ENV
+                  fi
+
+            - name: Verificar compilacion
+              if: env.salida == '1'
+              run: |
+                  nombre=$(grep '^STUDENT_NAME=' student.env | cut -d '=' -f2 | xargs)
+                  correo=$(grep '^STUDENT_EMAIL=' student.env | cut -d '=' -f2 | xargs)
+
+                  USUARIO=$(echo "$correo" | cut -d '@' -f1)
+                  REPO=$(basename "$GITHUB_REPOSITORY")
+                  ARCHIVO="$USUARIO-$REPO.txt"
+
+                  echo "::warning title=Error de compilacion::El código no compiló. Nota final: 0 / 9"
+                  echo "👤 Estudiante: $nombre" > "$ARCHIVO"
+                  echo "✉️ Correo: $correo" >> "$ARCHIVO"
+                  echo "❌ Error: No se pudo compilar el código" >> "$ARCHIVO"
+                  echo "📊 Nota final: 0 / 9" >> "$ARCHIVO"
+
+                  echo "ARCHIVO=$ARCHIVO" >> $GITHUB_ENV
+
+            - name: Ejecutar pruebas
+              if: env.salida == '0'
+              continue-on-error: true
+              run: |
+                  mkdir -p resultados
+
+                  # Ejecutar tests de PedidoController
+                  if javap -cp bin test.PedidoControllerTest > /dev/null 2>&1; then
+                    SELECT_CLASS="test.PedidoControllerTest"
+                  else
+                    echo "No se encontró la clase test.PedidoControllerTest"
+                    exit 1
+                  fi
+
+                  java -jar lib/junit-platform-console-standalone-1.7.0.jar \
+                    --class-path "bin:lib/*" \
+                    --select-class "$SELECT_CLASS" \
+                    --details tree \
+                    --disable-ansi-colors \
+                  | tee resultados/salida.txt
+
+            - name: Leer nombre y correo del estudiante
+              if: env.salida == '0'
+              id: estudiante
+              run: |
+                  nombre=$(grep '^STUDENT_NAME=' student.env | cut -d '=' -f2 | xargs)
+                  correo=$(grep '^STUDENT_EMAIL=' student.env | cut -d '=' -f2 | xargs)
+                  echo "nombre=$nombre" >> $GITHUB_OUTPUT
+                  echo "correo=$correo" >> $GITHUB_OUTPUT
+
+            - name: Calcular nota
+              if: env.salida == '0'
+              run: |
+                  PASADAS=$(grep "tests successful" resultados/salida.txt | grep -oP '\[\s*\K\d+')
+                  FALLADAS=$(grep "tests failed" resultados/salida.txt | grep -oP '\[\s*\K\d+')
+
+                  if [ -z "$PASADAS" ]; then PASADAS=0; fi
+                  if [ -z "$FALLADAS" ]; then FALLADAS=0; fi
+                  TOTAL=$((PASADAS + FALLADAS))
+
+                  if [ "$TOTAL" -eq 0 ]; then
+                    NOTA=0
+                  else
+                    NOTA=$(echo "scale=2; $PASADAS * 9 / $TOTAL" | bc)
+                  fi
+
+                  USUARIO=$(echo "${{ steps.estudiante.outputs.correo }}" | cut -d '@' -f1)
+                  REPO=$(basename "$GITHUB_REPOSITORY")
+                  ARCHIVO="$USUARIO-$REPO.txt"
+
+                  echo "👤 Estudiante: ${{ steps.estudiante.outputs.nombre }}" > "$ARCHIVO"
+                  echo "✉️ Correo: ${{ steps.estudiante.outputs.correo }}" >> "$ARCHIVO"
+                  echo "✅ $PASADAS de $TOTAL pruebas pasadas" >> "$ARCHIVO"
+                  echo "📊 Nota final: $NOTA / 9" >> "$ARCHIVO"
+
+                  echo "ARCHIVO=$ARCHIVO" >> $GITHUB_ENV
+                  echo "::notice title=Nota Final::${{ steps.estudiante.outputs.nombre }} obtuvo $NOTA / 9 (${PASADAS} de ${TOTAL} pruebas)"
+
+            - name: Subir resultado
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.ARCHIVO }}
+                  path: ${{ env.ARCHIVO }}
